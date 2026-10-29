@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>Notepad</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="side">
+    <div class="side__top">
+      <div class="search">
+        <span class="search__icon" data-icon="search" data-size="14"></span>
+        <input id="search" type="search" placeholder="Search notes" aria-label="Search notes"
+          autocomplete="off" spellcheck="false">
+      </div>
+      <button class="btn btn--icon" id="new" title="New note &nbsp; Ctrl+N" aria-label="New note"
+        data-icon="plus"></button>
+    </div>
+
+    <div class="side__tabs" role="tablist" aria-label="Which notes">
+      <button class="tab" role="tab" aria-selected="true" data-view="notes">
+        <span data-icon="files" data-size="13"></span>Notes
+      </button>
+      <button class="tab" role="tab" aria-selected="false" data-view="trash">
+        <span data-icon="trash" data-size="13"></span>Trash
+      </button>
+    </div>
+
+    <div class="list" id="list" role="listbox" aria-label="Notes"></div>
+
+    <div class="side__foot">
+      <button class="folder" id="folder" title="Change the notes folder">
+        <b><span data-icon="folder" data-size="12"></span><span id="folderName">Notepad</span></b>
+        <span id="count">0 notes</span>
+      </button>
+      <button class="btn btn--quiet btn--icon btn--sm" id="reveal" data-icon="folder-open"
+        data-size="14" title="Show the folder on disk" aria-label="Show the folder on disk"></button>
+      <button class="btn btn--quiet btn--icon btn--sm" id="theme" data-size="14"
+        title="Switch theme" aria-label="Switch theme"></button>
+    </div>
+  </aside>
+
+  <main class="pad">
+    <div class="pad__bar">
+      <button class="btn btn--quiet btn--icon" id="toggleSide" data-icon="panel-left"
+        title="Hide the list &nbsp; Ctrl+\" aria-label="Hide the list"></button>
+
+      <div class="strip" id="strip" role="tablist" aria-label="Open notes">
+        <div class="strip__rail" id="rail">
+          <div class="strip__ink" id="ink" aria-hidden="true"></div>
+        </div>
+      </div>
+
+      <button class="btn btn--quiet btn--icon strip__new" id="newTab" data-icon="plus" data-size="14"
+        title="New note &nbsp; Ctrl+N" aria-label="New note"></button>
+
+      <span class="pad__state" id="state"></span>
+
+      <div class="seg" id="ext" role="group" aria-label="File format">
+        <button data-ext="md" aria-pressed="true" title="Markdown">.md</button>
+        <button data-ext="txt" aria-pressed="false" title="Plain text">.txt</button>
+      </div>
+
+      <button class="btn btn--quiet btn--icon" id="togglePreview" data-icon="eye"
+        title="Preview &nbsp; Ctrl+E" aria-label="Preview" aria-pressed="false"></button>
+
+      <button class="btn btn--quiet btn--icon" id="more" data-icon="more"
+        title="More" aria-label="More actions" aria-haspopup="menu"></button>
+    </div>
+
+    <div class="pad__body" id="body">
+      <textarea class="editor" id="editor" spellcheck="false" placeholder="Start typing."
+        aria-label="Note" hidden></textarea>
+      <div class="preview" id="preview" hidden></div>
+      <div class="empty" id="empty">
+        <span data-icon="note" data-size="28" class="empty__icon"></span>
+        <strong>No note open</strong>
+        Press Ctrl+N for a new one, or Ctrl+K to find one.
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div class="sr" id="live" role="status" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
