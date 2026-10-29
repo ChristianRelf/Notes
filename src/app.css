@@ -121,7 +121,7 @@ svg{flex:none;display:block}
   transition:background var(--t-hover) var(--ease), border-color var(--t-hover) var(--ease)}
 .note:hover{background:var(--hover)}
 .note[aria-current="true"]{background:var(--accent-soft);border-color:var(--accent-line)}
-.note__icon{flex:none;margin-top:2px;color:var(--text-4);
+.note__icon{flex:none;display:flex;margin-top:5px;color:var(--text-4);
   transition:color var(--t-hover) var(--ease)}
 .note[aria-current="true"] .note__icon{color:var(--text-3)}
 .note__text{min-width:0;flex:1}
@@ -194,8 +194,8 @@ svg{flex:none;display:block}
 
 .seg{display:inline-flex;flex:none;padding:2px;gap:2px;background:var(--bg-sunken);
   border-radius:var(--r-sm)}
-.seg button{height:22px;padding:0 9px;border:0;border-radius:4px;background:transparent;
-  color:var(--text-3);font-size:var(--fs-xs);font-weight:500;cursor:default;font-family:var(--mono);
+.seg button{display:inline-flex;align-items:center;justify-content:center;width:34px;height:22px;
+  padding:0;border:0;border-radius:4px;background:transparent;color:var(--text-4);cursor:default;
   transition:background var(--t-hover) var(--ease), color var(--t-hover) var(--ease)}
 .seg button:hover{color:var(--text)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--text);

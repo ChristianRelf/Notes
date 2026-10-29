@@ -48,8 +48,21 @@ const ICONS = {
   eye: '<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>',
   pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
-  note: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/>',
-  text: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/>',
+  // The Markdown mark (dcurtis/markdown-mark, CC0), and a plain-text mark drawn
+  // on the same 208x128 footprint so the pair sits level wherever both appear.
+  // The rule's stroke is a touch heavier than the official 10 so it survives 14px.
+  md: {
+    viewBox: '0 0 208 128', h: 128 / 208,
+    body: '<rect x="6.5" y="6.5" width="195" height="115" rx="11" fill="none"'
+      + ' stroke="currentColor" stroke-width="13"/>'
+      + '<path fill="currentColor" d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0'
+      + 'l-30-33h20V30h20v35h20z"/>',
+  },
+  txt: {
+    viewBox: '0 0 208 128', h: 128 / 208,
+    body: '<path fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round"'
+      + ' d="M34 34h140M34 64h140M34 94h74"/>',
+  },
   files: '<path d="M15 2H9.6A1.6 1.6 0 0 0 8 3.6v12.8c0 .9.7 1.6 1.6 1.6h8.8c.9 0 1.6-.7 1.6-1.6V7Z"/><path d="M15 2v5h5"/><path d="M4.5 7.5v12.9c0 .9.7 1.6 1.6 1.6H15"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
@@ -64,17 +77,28 @@ const ICONS = {
 };
 
 function icon(name, size) {
+  const def = ICONS[name];
+  const s = size || 16;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('aria-hidden', 'true');
+
+  if (def && typeof def === 'object') {        // a mark, with its own geometry
+    svg.setAttribute('viewBox', def.viewBox);
+    svg.setAttribute('width', Math.round(s * (def.w || 1)));
+    svg.setAttribute('height', Math.round(s * (def.h || 1)));
+    svg.innerHTML = def.body;
+    return svg;
+  }
+
   svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('width', size || 16);
-  svg.setAttribute('height', size || 16);
+  svg.setAttribute('width', s);
+  svg.setAttribute('height', s);
   svg.setAttribute('fill', 'none');
   svg.setAttribute('stroke', 'currentColor');
   svg.setAttribute('stroke-width', '1.75');
   svg.setAttribute('stroke-linecap', 'round');
   svg.setAttribute('stroke-linejoin', 'round');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.innerHTML = ICONS[name] || '';
+  svg.innerHTML = def || '';
   return svg;
 }
 
@@ -88,7 +112,7 @@ function hydrateIcons(scope) {
   }
 }
 
-const noteIcon = n => icon(n.ext === 'txt' ? 'text' : 'note', 14);
+const noteIcon = (n, size) => icon(n.ext === 'txt' ? 'txt' : 'md', size || 15);
 
 /* ------------------------------------------------------------ words */
 

@@ -58,8 +58,10 @@
       <span class="pad__state" id="state"></span>
 
       <div class="seg" id="ext" role="group" aria-label="File format">
-        <button data-ext="md" aria-pressed="true" title="Markdown">.md</button>
-        <button data-ext="txt" aria-pressed="false" title="Plain text">.txt</button>
+        <button data-ext="md" aria-pressed="true" title="Markdown &nbsp; .md"
+          aria-label="Markdown" data-icon="md" data-size="17"></button>
+        <button data-ext="txt" aria-pressed="false" title="Plain text &nbsp; .txt"
+          aria-label="Plain text" data-icon="txt" data-size="17"></button>
       </div>
 
       <button class="btn btn--quiet btn--icon" id="togglePreview" data-icon="eye"
@@ -74,7 +76,7 @@
         aria-label="Note" hidden></textarea>
       <div class="preview" id="preview" hidden></div>
       <div class="empty" id="empty">
-        <span data-icon="note" data-size="28" class="empty__icon"></span>
+        <span data-icon="txt" data-size="30" class="empty__icon"></span>
         <strong>No note open</strong>
         Press Ctrl+N for a new one, or Ctrl+K to find one.
       </div>
