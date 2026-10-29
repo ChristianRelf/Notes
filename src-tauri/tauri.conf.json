@@ -14,8 +14,8 @@
         "title": "Notepad",
         "width": 1080,
         "height": 720,
-        "minWidth": 480,
-        "minHeight": 360,
+        "minWidth": 600,
+        "minHeight": 380,
         "resizable": true,
         "dragDropEnabled": true,
         "center": true

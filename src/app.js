@@ -25,15 +25,24 @@ let query = '';
 let preview = false;
 let root = '';
 
+/* Kept in the app's settings.json by the Rust side, not in webview storage. */
+const stored = { theme: 'auto', side: 'hidden', open: [], last: '' };
+let prefsTimer = null;
+function remember() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    invoke('save_prefs', { prefs: { ...stored, open } }).catch(() => {});
+  }, 200);
+}
 const prefs = {
-  get theme() { return localStorage.getItem('np.theme') || 'auto'; },
-  set theme(v) { localStorage.setItem('np.theme', v); },
-  get side() { return localStorage.getItem('np.side') || 'shown'; },
-  set side(v) { localStorage.setItem('np.side', v); },
-  get open() { try { return JSON.parse(localStorage.getItem('np.open')) || []; } catch { return []; } },
-  set open(v) { localStorage.setItem('np.open', JSON.stringify(v)); },
-  get last() { return localStorage.getItem('np.last') || ''; },
-  set last(v) { localStorage.setItem('np.last', v || ''); },
+  get theme() { return stored.theme || 'auto'; },
+  set theme(v) { stored.theme = v; remember(); },
+  get side() { return stored.side || 'hidden'; },
+  set side(v) { stored.side = v; remember(); },
+  get open() { return stored.open || []; },
+  set open(v) { stored.open = v; remember(); },
+  get last() { return stored.last || ''; },
+  set last(v) { stored.last = v || ''; remember(); },
 };
 
 const byId = id => notes.find(n => n.id === id);
@@ -135,6 +144,24 @@ function bucket(ms) {
   return d.getFullYear() === new Date().getFullYear() ? 'Earlier this year' : String(d.getFullYear());
 }
 
+/* A note's title is its filename. A note you have not named follows the first
+   line that has anything on it, and the file on disk follows with it. Renaming
+   it yourself (F2) settles the name and stops it following. */
+const UNTITLED = /^Untitled( \d+)?$/i;
+
+function firstLine(body) {
+  const line = (body || '').split('\n').find(l => l.trim());
+  if (!line) return '';
+  return line
+    .replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^>\s*/, '')
+    .replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+}
+
+/** Only safe to judge when name and body came off disk together. */
+function markUnnamed(list) {
+  for (const n of list) n.auto = UNTITLED.test(n.name) || n.name === firstLine(n.body);
+}
+
 function snippet(n) {
   const body = (n.body || '').replace(/\s+/g, ' ').trim().replace(/^#{1,6}\s*/, '');
   return (body.startsWith(n.name) ? body.slice(n.name.length) : body).trim().slice(0, 140);
@@ -203,7 +230,6 @@ async function flush() {
 
 addEventListener('beforeunload', flush);
 addEventListener('blur', flush);
-document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 
 /* ------------------------------------------------------------ tabs */
 
@@ -225,6 +251,7 @@ function makeTab(n) {
   b.append(ic, nm, dot, close);
 
   b.onclick = e => {
+    if (panned) return;
     if (e.target.closest('.doc__close')) { closeTab(b.dataset.id); return; }
     select(b.dataset.id);
   };
@@ -258,7 +285,7 @@ function renderTabs() {
     if (!node) {
       node = makeTab(n);
       tabEls.set(id, node);
-      el.rail.appendChild(node);
+      el.rail.insertBefore(node, $('#newTab'));   // the + always trails the tabs
     }
     node.dataset.id = n.id;
     node.dataset.transient = String(transient === id);
@@ -291,6 +318,35 @@ function moveInk() {
   });
 }
 addEventListener('resize', moveInk);
+
+/* Scroll or drag anywhere along the bar to move through the open notes. */
+el.strip.addEventListener('wheel', e => {
+  const by = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  if (!by) return;
+  e.preventDefault();
+  el.strip.scrollLeft += by;
+}, { passive: false });
+
+let pan = null, panned = false;
+el.strip.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  pan = { x: e.clientX, from: el.strip.scrollLeft, moved: false };
+});
+addEventListener('pointermove', e => {
+  if (!pan) return;
+  const dx = e.clientX - pan.x;
+  if (!pan.moved && Math.abs(dx) < 4) return;   // a click is still a click
+  pan.moved = true;
+  el.strip.dataset.panning = 'true';
+  el.strip.scrollLeft = pan.from - dx;
+});
+addEventListener('pointerup', () => {
+  if (!pan) return;
+  panned = pan.moved;
+  pan = null;
+  delete el.strip.dataset.panning;
+  setTimeout(() => { panned = false; }, 0);     // swallow the click a drag ends on
+});
 
 function pinTab(id) {
   if (transient === id) { transient = null; renderTabs(); }
@@ -471,6 +527,7 @@ async function create(name, ext, body) {
     const n = await invoke('create', {
       name: name || 'Untitled', ext: ext || 'md', body: body || '',
     });
+    n.auto = !name;                      // unnamed notes follow their first line
     notes.push(n);
     if (view !== 'notes') { view = 'notes'; syncViewTabs(); }
     await select(n.id, { pin: true });
@@ -487,11 +544,24 @@ function syncViewTabs() {
 
 /* ------------------------------------------------------------ editing */
 
+let titleTimer = null;
+function followFirstLine(note) {
+  clearTimeout(titleTimer);
+  if (!note || !note.auto) return;
+  titleTimer = setTimeout(async () => {
+    if (!note.auto || note.trashed) return;
+    const wanted = firstLine(note.body);
+    if (!wanted || wanted === note.name) return;
+    await applyRename(note, wanted, note.ext, true);
+  }, 1200);
+}
+
 el.editor.addEventListener('input', () => {
   if (!current) return;
   current.body = el.editor.value;
   pinTab(current.id);     // typing in it means you meant to keep it
   touch();
+  followFirstLine(current);
 });
 
 el.editor.addEventListener('keydown', e => {
@@ -509,20 +579,27 @@ async function renameNote(n) {
   if (!note) return;
   const wanted = await promptDialog({
     title: 'Rename note',
-    label: 'The file is renamed in the folder too.',
+    label: note.auto
+      ? 'This note follows its first line. Naming it stops that, and renames the file in the folder.'
+      : 'The file is renamed in the folder too.',
     value: note.name,
     confirm: 'Rename',
   });
   if (wanted === null || wanted.trim() === note.name) return;
-  await applyRename(note, wanted.trim() || 'Untitled', note.ext);
+  await applyRename(note, wanted.trim() || 'Untitled', note.ext, false);
 }
 
-async function applyRename(note, name, ext) {
+/** `auto` carries whether the note still follows its first line. */
+async function applyRename(note, name, ext, auto) {
+  clearTimeout(titleTimer);
   await flush();
   const was = note.id;
   try {
     const fresh = await invoke('rename', { id: was, name, ext });
     Object.assign(note, fresh);
+    // A name already taken comes back with a number on it; stop following
+    // rather than renaming on every keystroke from here on.
+    note.auto = auto === undefined ? note.auto : (auto && fresh.name === name);
     const i = open.indexOf(was);
     if (i >= 0) open[i] = note.id;
     if (transient === was) transient = note.id;
@@ -538,7 +615,7 @@ el.ext.addEventListener('click', e => {
   const b = e.target.closest('button');
   if (!b || !current || b.dataset.ext === current.ext) return;
   if (b.dataset.ext === 'txt' && preview) togglePreview();
-  applyRename(current, current.name, b.dataset.ext);
+  applyRename(current, current.name, b.dataset.ext, current.auto);
 });
 
 el.search.addEventListener('input', () => { query = el.search.value; renderList(); });
@@ -641,7 +718,7 @@ el.preview.addEventListener('click', e => {
   const a = e.target.closest('a');
   if (!a) return;
   e.preventDefault();
-  if (/^https?:/i.test(a.href)) window.open(a.href, '_blank');
+  invoke('open_url', { url: a.href }).catch(err => failed(err, "Couldn't open that link."));
 });
 
 /* ------------------------------------------------------------ dialogs */
@@ -945,6 +1022,7 @@ async function importPaths(paths) {
   try {
     const made = await invoke('import', { paths });
     if (!made.length) { toast('Nothing to import. Notepad takes .md and .txt files.'); return; }
+    markUnnamed(made);
     notes.push(...made);
     renderList();
     toast('Imported ' + (made.length === 1 ? made[0].name : made.length + ' files'));
@@ -984,6 +1062,12 @@ addEventListener('keydown', e => {
   if (e.key === 'F2' && current) { e.preventDefault(); renameNote(); return; }
   if (!(e.ctrlKey || e.metaKey)) return;
   const k = e.key.toLowerCase();
+  // Holding a key repeats it. Making or closing notes should happen once per
+  // press, not forty times because a finger rested on Ctrl+N.
+  if (e.repeat && ['n', 'w', 'delete'].includes(e.key.toLowerCase())) {
+    e.preventDefault();
+    return;
+  }
 
   if (e.key === 'Tab') {
     e.preventDefault();
@@ -1015,8 +1099,12 @@ addEventListener('keydown', e => {
 /* ------------------------------------------------------------ start */
 
 function adopt(loaded) {
+  Object.assign(stored, loaded.prefs || {});
+  applyTheme();
+  applySide();
   root = loaded.root;
   notes = loaded.notes;
+  markUnnamed(notes);
   el.folderName.textContent = shortFolder(root);
   $('#folder').title = root + '\nClick to change the notes folder';
   current = null;
@@ -1040,6 +1128,7 @@ listen('notes:changed', event => {
   const mine = current && dirty ? current.body : null;
 
   notes = event.payload;
+  markUnnamed(notes);
   open = open.filter(id => { const n = byId(id); return n && !n.trashed; });
   prefs.open = open;
 
@@ -1068,10 +1157,19 @@ listen('tauri://drag-drop', event => {
   if (paths.length) importPaths(paths);
 });
 
+/* This is a desktop window, not a web page: no reload, no print, no find bar,
+   no browser context menu. */
+addEventListener('contextmenu', e => {
+  if (!e.target.closest('input, textarea, .preview')) e.preventDefault();
+});
+addEventListener('keydown', e => {
+  const browserish = e.key === 'F5' || e.key === 'F7'
+    || ((e.ctrlKey || e.metaKey) && ['r', 'p', 'g', 'j', 'u', 'o'].includes(e.key.toLowerCase()));
+  if (browserish) e.preventDefault();
+}, true);
+
 (async () => {
   hydrateIcons();
-  applyTheme();
-  applySide();
   syncViewTabs();
   try {
     adopt(await invoke('load'));
@@ -1096,7 +1194,13 @@ listen('tauri://drag-drop', event => {
       + '- Ctrl+Delete  move to trash\n\n'
       + '## Tabs\n\n'
       + 'One click opens a note in an italic tab that the next click reuses.\n'
-      + 'Type in it, double-click it, or open it from Ctrl+K to keep it.\n\n'
+      + 'Type in it, double-click it, or open it from Ctrl+K to keep it.\n'
+      + 'Scroll or drag along the tab bar to move through them. The + sits\n'
+      + 'after the last one.\n\n'
+      + '## Titles\n\n'
+      + 'A new note takes its title, and its filename, from the first line you\n'
+      + 'type, and keeps following it. Rename it with F2 and it stops following\n'
+      + 'and keeps the name you gave it.\n\n'
       + 'Drop .md or .txt files on the window to bring them in. Edit a file in\n'
       + 'another editor and it updates here straight away.\n\n'
       + 'Delete this when you are done with it.\n');

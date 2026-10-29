@@ -152,8 +152,10 @@ svg{flex:none;display:block}
   border-bottom:1px solid var(--divider)}
 
 .strip{flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
-  margin:0 2px;align-self:stretch;display:flex;align-items:center}
+  margin:0 2px;align-self:stretch;display:flex;align-items:center;cursor:grab}
 .strip::-webkit-scrollbar{height:0}
+.strip[data-panning="true"]{cursor:grabbing;scroll-behavior:auto}
+.strip[data-panning="true"] *{pointer-events:none}
 .strip__rail{position:relative;display:flex;align-items:center;gap:2px;min-width:100%;
   width:max-content;height:100%}
 
@@ -185,8 +187,12 @@ svg{flex:none;display:block}
              opacity var(--t-menu) var(--ease)}
 .strip__ink[data-on="true"]{opacity:.85}
 
-.strip__new{opacity:.75}
-.strip__new:hover{opacity:1}
+/* Sits in the rail, so it trails the last tab and pans along with them. */
+.strip__new{flex:none;display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;margin-left:2px;border:0;border-radius:var(--r-sm);
+  background:transparent;color:var(--text-4);cursor:default;
+  transition:background var(--t-hover) var(--ease), color var(--t-hover) var(--ease)}
+.strip__new:hover{background:var(--hover);color:var(--text-2)}
 
 .pad__state{flex:none;padding:0 2px;font-size:var(--fs-xs);color:var(--text-3);white-space:nowrap;
   transition:opacity var(--t-panel) var(--ease)}
@@ -310,4 +316,3 @@ svg{flex:none;display:block}
 @keyframes rise{from{opacity:0;transform:translateY(8px) scale(var(--enter-scale))}}
 
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-@media (max-width:640px){ .app{grid-template-columns:1fr} .side{display:none} }

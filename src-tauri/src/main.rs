@@ -41,11 +41,37 @@ struct Note {
 struct Loaded {
     root: String,
     notes: Vec<Note>,
+    prefs: Prefs,
+}
+
+/// What the window remembers between runs. It lives in settings.json beside
+/// the app's config, not in webview storage, so clearing a cache or moving the
+/// notes folder never loses it.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+struct Prefs {
+    theme: String,
+    side: String,
+    open: Vec<String>,
+    last: String,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            theme: "auto".into(),
+            side: "hidden".into(),   // the pad is the main thing
+            open: Vec::new(),
+            last: String::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 struct Settings {
     root: Option<String>,
+    prefs: Prefs,
 }
 
 struct App {
@@ -54,6 +80,7 @@ struct App {
     /// Paths we wrote ourselves, so the watcher can ignore the echo.
     ours: Mutex<HashMap<String, Instant>>,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    prefs: RwLock<Prefs>,
     config: PathBuf,
 }
 
@@ -247,6 +274,7 @@ impl App {
     fn save_settings(&self) {
         let s = Settings {
             root: Some(self.root().to_string_lossy().to_string()),
+            prefs: self.prefs.read().unwrap().clone(),
         };
         if let Some(parent) = self.config.parent() {
             let _ = fs::create_dir_all(parent);
@@ -324,7 +352,46 @@ fn load(state: State<App>) -> Loaded {
     Loaded {
         root: root.to_string_lossy().to_string(),
         notes,
+        prefs: state.prefs.read().unwrap().clone(),
     }
+}
+
+#[tauri::command]
+fn save_prefs(state: State<App>, prefs: Prefs) {
+    *state.prefs.write().unwrap() = prefs;
+    state.save_settings();
+}
+
+/// Open a link in the real browser, never inside this window.
+#[tauri::command]
+fn open_url(url: String) -> R<()> {
+    let ok = (url.starts_with("http://") || url.starts_with("https://"))
+        && url.len() < 2048
+        && !url.chars().any(|c| c.is_control());
+    if !ok {
+        return Err("That link isn't a web address.".into());
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // rundll32 takes the URL as data, so nothing in it can be read as a flag.
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(&url);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("--").arg(&url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
+    cmd.spawn().map_err(|e| why("open that link", e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -649,6 +716,24 @@ mod tests {
     }
 
     #[test]
+    fn open_url_takes_web_addresses_only() {
+        for bad in [
+            "file:///C:/Windows/System32/calc.exe",
+            "C:\\Windows\\System32\\calc.exe",
+            "javascript:alert(1)",
+            "ht tp://example.com",
+            "",
+            "https://example.com/\u{0}evil",
+            "https://example.com/a\nb",
+        ] {
+            assert!(open_url(bad.into()).is_err(), "should refuse {bad:?}");
+        }
+        // The long-URL guard, checked without spawning a browser.
+        let long = format!("https://example.com/{}", "a".repeat(2100));
+        assert!(open_url(long).is_err());
+    }
+
+    #[test]
     fn writing_is_atomic_and_leaves_no_temp_behind() {
         let dir = tmp("atomic");
         let path = dir.join("note.md");
@@ -678,10 +763,13 @@ fn main() {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("settings.json");
 
-            let saved: Option<PathBuf> = fs::read_to_string(&config)
+            let settings: Settings = fs::read_to_string(&config)
                 .ok()
-                .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-                .and_then(|s| s.root)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let saved = settings
+                .root
+                .clone()
                 .map(PathBuf::from)
                 .filter(|p| p.is_dir());
 
@@ -698,6 +786,7 @@ fn main() {
                 notes: RwLock::new(HashMap::new()),
                 ours: Mutex::new(HashMap::new()),
                 watcher: Mutex::new(None),
+                prefs: RwLock::new(settings.prefs),
                 config,
             });
             app.state::<App>().save_settings();
@@ -715,7 +804,9 @@ fn main() {
             empty_trash,
             import,
             set_root,
-            reveal
+            reveal,
+            save_prefs,
+            open_url
         ])
         .run(tauri::generate_context!())
         .expect("Notepad couldn't start.");
