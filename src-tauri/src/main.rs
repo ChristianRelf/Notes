@@ -54,6 +54,8 @@ struct Prefs {
     side: String,
     open: Vec<String>,
     last: String,
+    /// The only setting that lets anything off this computer.
+    links: bool,
 }
 
 impl Default for Prefs {
@@ -63,6 +65,7 @@ impl Default for Prefs {
             side: "hidden".into(),   // the pad is the main thing
             open: Vec::new(),
             last: String::new(),
+            links: true,
         }
     }
 }
@@ -82,6 +85,8 @@ struct App {
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     prefs: RwLock<Prefs>,
     config: PathBuf,
+    cache: PathBuf,
+    cards: RwLock<HashMap<String, LinkCard>>,
 }
 
 type R<T> = Result<T, String>;
@@ -648,6 +653,329 @@ fn reveal(state: State<App>, id: Option<String>) -> R<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- links
+//
+// Favicons and hover previews are the one part of Notepad that touches the
+// network. Each site is asked directly - never a favicon service, which would
+// hand a third party every domain in your notes - and the answer is cached on
+// disk, so a link is fetched once and is instant from then on. Off entirely
+// when prefs.links is false.
+
+const CARD_HTML_CAP: usize = 256 * 1024;
+const CARD_IMAGE_CAP: usize = 512 * 1024;
+const CARD_ICON_CAP: usize = 96 * 1024;
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+struct LinkCard {
+    url: String,
+    host: String,
+    title: String,
+    description: String,
+    image: String, // data: URI, or empty
+    icon: String,  // data: URI, or empty
+    ok: bool,
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { A[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Enough of a hash to name a cache file.
+fn key_of(s: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.")
+        .to_string()
+}
+
+fn is_web(url: &str) -> bool {
+    (url.starts_with("http://") || url.starts_with("https://"))
+        && url.len() < 2048
+        && !url.chars().any(|c| c.is_control())
+        && !host_of(url).is_empty()
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(4)))
+        .timeout_global(Some(Duration::from_secs(8)))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Notepad/1.1 link-preview")
+        .build()
+        .into()
+}
+
+fn fetch_capped(a: &ureq::Agent, url: &str, cap: usize) -> Option<(Vec<u8>, String)> {
+    let mut res = a.get(url).call().ok()?;
+    if res.status().as_u16() >= 400 {
+        return None;
+    }
+    let kind = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut body = Vec::new();
+    use std::io::Read as _;
+    res.body_mut()
+        .as_reader()
+        .take(cap as u64)
+        .read_to_end(&mut body)
+        .ok()?;
+    Some((body, kind))
+}
+
+/// Pull one attribute out of a tag, tolerating single or double quotes.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&format!("{name}="))?;
+    let rest = tag[at + name.len() + 1..].trim_start();
+    let quote = rest.chars().next()?;
+    let (open, close) = if quote == '"' || quote == '\'' {
+        (1, quote)
+    } else {
+        (0, ' ')
+    };
+    let body = &rest[open..];
+    let end = body.find(close).unwrap_or(body.len());
+    Some(unescape(body[..end].trim()))
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+}
+
+/// Every <meta> and <link> tag in the document head, as raw strings.
+fn tags<'a>(html: &'a str, name: &str) -> Vec<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let needle = format!("<{name}");
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(&needle) {
+        let start = from + i;
+        let end = html[start..].find('>').map(|e| start + e).unwrap_or(html.len());
+        out.push(&html[start..end]);
+        from = end.max(start + 1);
+        if out.len() > 400 {
+            break;
+        }
+    }
+    out
+}
+
+fn meta(html: &str, keys: &[&str]) -> String {
+    for tag in tags(html, "meta") {
+        let who = attr(tag, "property")
+            .or_else(|| attr(tag, "name"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if keys.contains(&who.as_str()) {
+            let v = attr(tag, "content").unwrap_or_default();
+            if !v.trim().is_empty() {
+                return v.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Turn whatever a page put in href into an absolute URL.
+fn absolute(base: &str, href: &str) -> Option<String> {
+    let href = href.trim();
+    if href.is_empty() || href.starts_with("data:") || href.starts_with("javascript:") {
+        return None;
+    }
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return Some(href.to_string());
+    }
+    let scheme = if base.starts_with("http://") { "http" } else { "https" };
+    let host = base.split("://").nth(1)?.split(['/', '?', '#']).next()?;
+    if let Some(rest) = href.strip_prefix("//") {
+        return Some(format!("{scheme}://{rest}"));
+    }
+    if href.starts_with('/') {
+        return Some(format!("{scheme}://{host}{href}"));
+    }
+    let dir = base.split(['?', '#']).next()?;
+    let dir = &dir[..dir.rfind('/').unwrap_or(dir.len())];
+    Some(format!("{dir}/{href}"))
+}
+
+fn as_data_uri(bytes: &[u8], kind: &str) -> String {
+    let kind = if kind.starts_with("image/") {
+        kind
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+        "image/svg+xml"
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        "image/x-icon"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return String::new();
+    };
+    format!("data:{kind};base64,{}", b64(bytes))
+}
+
+fn build_card(url: &str) -> LinkCard {
+    let a = agent();
+    let host = host_of(url);
+    let mut card = LinkCard {
+        url: url.to_string(),
+        host: host.clone(),
+        ..Default::default()
+    };
+
+    let Some((body, kind)) = fetch_capped(&a, url, CARD_HTML_CAP) else {
+        // Even when the page will not load, the usual favicon path often does.
+        if let Some((bytes, k)) = fetch_capped(&a, &format!("https://{host}/favicon.ico"), CARD_ICON_CAP) {
+            card.icon = as_data_uri(&bytes, &k);
+            card.ok = !card.icon.is_empty();
+        }
+        return card;
+    };
+
+    if !kind.starts_with("text/html") && !kind.is_empty() {
+        card.title = url.rsplit('/').next().unwrap_or("").to_string();
+        card.description = kind;
+        card.ok = true;
+        return card;
+    }
+
+    let html = String::from_utf8_lossy(&body);
+    let head = &html[..html.len().min(CARD_HTML_CAP)];
+
+    card.title = meta(head, &["og:title", "twitter:title"]);
+    if card.title.is_empty() {
+        if let Some(i) = head.to_ascii_lowercase().find("<title") {
+            if let Some(s) = head[i..].find('>') {
+                let from = i + s + 1;
+                if let Some(e) = head[from..].to_ascii_lowercase().find("</title") {
+                    card.title = unescape(head[from..from + e].trim()).replace('\n', " ");
+                }
+            }
+        }
+    }
+    card.description = meta(head, &["og:description", "twitter:description", "description"]);
+    card.title.truncate(160);
+    card.description.truncate(400);
+
+    // Preview image
+    let img = meta(head, &["og:image", "twitter:image", "og:image:url"]);
+    if !img.is_empty() {
+        if let Some(abs) = absolute(url, &img) {
+            if let Some((bytes, k)) = fetch_capped(&a, &abs, CARD_IMAGE_CAP) {
+                card.image = as_data_uri(&bytes, &k);
+            }
+        }
+    }
+
+    // Favicon: what the page declares, else the well-known path.
+    let mut icons: Vec<(i32, String)> = Vec::new();
+    for tag in tags(head, "link") {
+        let rel = attr(tag, "rel").unwrap_or_default().to_ascii_lowercase();
+        if !rel.split_whitespace().any(|r| r == "icon" || r == "apple-touch-icon") {
+            continue;
+        }
+        let Some(href) = attr(tag, "href").and_then(|h| absolute(url, &h)) else { continue };
+        // Prefer something around 32px over a 16px or a huge one.
+        let size = attr(tag, "sizes")
+            .and_then(|s| s.split(['x', 'X']).next().and_then(|n| n.parse::<i32>().ok()))
+            .unwrap_or(if rel.contains("apple") { 180 } else { 16 });
+        icons.push(((size - 32).abs(), href));
+    }
+    icons.sort_by_key(|(d, _)| *d);
+    icons.push((999, format!("https://{host}/favicon.ico")));
+    for (_, href) in icons.iter().take(3) {
+        if let Some((bytes, k)) = fetch_capped(&a, href, CARD_ICON_CAP) {
+            let uri = as_data_uri(&bytes, &k);
+            if !uri.is_empty() {
+                card.icon = uri;
+                break;
+            }
+        }
+    }
+
+    card.ok = true;
+    card
+}
+
+/// Cached card for a link. Returns instantly once a link has been seen before.
+#[tauri::command]
+fn link_card(state: State<App>, url: String) -> R<LinkCard> {
+    if !state.prefs.read().unwrap().links {
+        return Err("Link previews are off.".into());
+    }
+    if !is_web(&url) {
+        return Err("That link isn't a web address.".into());
+    }
+    if let Some(hit) = state.cards.read().unwrap().get(&url) {
+        return Ok(hit.clone());
+    }
+    let file = state.cache.join(format!("{}.json", key_of(&url)));
+    if let Some(hit) = fs::read_to_string(&file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<LinkCard>(&s).ok())
+    {
+        state.cards.write().unwrap().insert(url, hit.clone());
+        return Ok(hit);
+    }
+
+    let card = build_card(&url);
+    let _ = fs::create_dir_all(&state.cache);
+    if let Ok(json) = serde_json::to_string(&card) {
+        let _ = fs::write(&file, json);
+    }
+    state.cards.write().unwrap().insert(url, card.clone());
+    Ok(card)
+}
+
+#[tauri::command]
+fn forget_links(state: State<App>) -> R<()> {
+    state.cards.write().unwrap().clear();
+    let _ = fs::remove_dir_all(&state.cache);
+    Ok(())
+}
+
 // ---------------------------------------------------------------- tests
 
 #[cfg(test)]
@@ -787,6 +1115,8 @@ fn main() {
                 ours: Mutex::new(HashMap::new()),
                 watcher: Mutex::new(None),
                 prefs: RwLock::new(settings.prefs),
+                cache: config.with_file_name("link-cache"),
+                cards: RwLock::new(HashMap::new()),
                 config,
             });
             app.state::<App>().save_settings();
@@ -806,7 +1136,9 @@ fn main() {
             set_root,
             reveal,
             save_prefs,
-            open_url
+            open_url,
+            link_card,
+            forget_links
         ])
         .run(tauri::generate_context!())
         .expect("Notepad couldn't start.");
